@@ -430,13 +430,13 @@ async def complete_task(task_id: str, data: CompletionRequest, user=Depends(auth
 # ─── Tag Routes ───
 
 @api_router.get("/tags", response_model=List[TagResponse])
-async def get_tags(user=Depends(auth_dependency)):
+async def get_tags():
     tags = await db.tags.find().to_list(100)
     return tags
 
 @api_router.post("/tags", response_model=TagResponse)
 async def create_tag(data: TagCreate, user=Depends(auth_dependency)):
-    existing = await db.tags.find_one({"user_id": user["id"], "name": data.name})
+    existing = await db.tags.find_one({"name": data.name})
     if existing:
         raise HTTPException(status_code=400, detail="Tag already exists")
     
@@ -454,7 +454,7 @@ async def create_tag(data: TagCreate, user=Depends(auth_dependency)):
 async def delete_tag(tag_id: str, user=Depends(auth_dependency)):
     result = await db.tags.delete_one({"id": tag_id, "user_id": user["id"]})
     if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Tag not found")
+        raise HTTPException(status_code=404, detail="Tag not found, or you don't have permission to delete it")
     return {"message": "Tag deleted"}
 
 # ─── Admin Routes ───
@@ -475,8 +475,12 @@ async def admin_delete_user(user_id: str, user=Depends(admin_dependency)):
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
     await db.users.delete_one({"id": user_id})
+    shared_tasks = await db.tasks.find({"user_id": user_id, "is_shared": {"$eq": True}}).to_list(1000)
+    shared_tags = set()
+    for task in shared_tasks:
+        shared_tags.update(map(lambda tag: tag["name"], task.get("tags", [])))
     await db.tasks.delete_many({"user_id": user_id, "is_shared": {"$ne": True}})
-    await db.tags.delete_many({"user_id": user_id})
+    await db.tags.delete_many({"user_id": user_id, "name": {"$nin": list(shared_tags)}})
     return {"message": "User deleted"}
 
 @api_router.put("/admin/users/{user_id}/toggle-admin", response_model=AdminUserResponse)
