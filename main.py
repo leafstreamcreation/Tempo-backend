@@ -431,7 +431,7 @@ async def complete_task(task_id: str, data: CompletionRequest, user=Depends(auth
 
 @api_router.get("/tags", response_model=List[TagResponse])
 async def get_tags(user=Depends(auth_dependency)):
-    tags = await db.tags.find({"user_id": user["id"]}, {"_id": 0}).to_list(100)
+    tags = await db.tags.find().to_list(100)
     return tags
 
 @api_router.post("/tags", response_model=TagResponse)
