@@ -73,6 +73,7 @@ class TaskCreate(BaseModel):
     tags: List[str] = []
     next_due: Optional[str] = None
     is_shared: bool = False
+    non_recurring: bool = False
 
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
@@ -94,6 +95,7 @@ class TaskResponse(BaseModel):
     completion_count: int
     last_completed: Optional[str] = None
     is_shared: bool = False
+    non_recurring: bool = False
     owner_name: str = ""
 
 class CompletionRequest(BaseModel):
@@ -309,6 +311,7 @@ async def create_task(data: TaskCreate, user=Depends(auth_dependency)):
         "completion_count": 0,
         "last_completed": None,
         "is_shared": data.is_shared,
+        "non_recurring": data.non_recurring,
         "owner_name": user["name"],
     }
     await db.tasks.insert_one(task_doc)
@@ -385,46 +388,60 @@ async def toggle_shared(task_id: str, user=Depends(auth_dependency)):
 @api_router.post("/tasks/{task_id}/complete", response_model=TaskResponse)
 async def complete_task(task_id: str, data: CompletionRequest, user=Depends(auth_dependency)):
     task = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+    updated = None
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     if task.get("user_id") != user["id"] and not task.get("is_shared"):
         raise HTTPException(status_code=403, detail="Access denied")
-    
-    current_interval = task["interval_days"]
-    
-    if data.feedback == "too_early":
-        new_interval = round(current_interval * 1.25, 1)
-    elif data.feedback == "too_late":
-        new_interval = max(1, round(current_interval * 0.75, 1))
-    else:
-        new_interval = current_interval
-    
-    now = datetime.now(timezone.utc)
-    new_next_due = (now + timedelta(days=new_interval)).isoformat()
-    
-    update_data = {
-        "interval_days": new_interval,
-        "next_due": new_next_due,
-        "last_completed": now.isoformat(),
-        "completion_count": task["completion_count"] + 1,
-        "updated_at": now.isoformat(),
-    }
-    
-    await db.tasks.update_one({"id": task_id}, {"$set": update_data})
-    
-    # Log completion
-    log_doc = {
-        "id": str(uuid.uuid4()),
-        "task_id": task_id,
-        "user_id": user["id"],
-        "completed_at": now.isoformat(),
-        "feedback": data.feedback,
-        "previous_interval": current_interval,
-        "new_interval": new_interval,
-    }
-    await db.completion_logs.insert_one(log_doc)
-    
-    updated = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+    if task.get("non_recurring"):
+        updated = task
+        await db.tasks.delete_one({"id": task_id})
+        log_doc = {
+            "id": str(uuid.uuid4()),
+            "task_id": task_id,
+            "user_id": user["id"],
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "feedback": "completed",
+            "previous_interval": task["interval_days"],
+            "new_interval": task["interval_days"],
+        }
+        await db.completion_logs.insert_one(log_doc)
+    else:   
+        current_interval = task["interval_days"]
+
+        if data.feedback == "too_early":
+            new_interval = round(current_interval * 1.25, 1)
+        elif data.feedback == "too_late":
+            new_interval = max(1, round(current_interval * 0.75, 1))
+        else:
+            new_interval = current_interval
+
+        now = datetime.now(timezone.utc)
+        new_next_due = (now + timedelta(days=new_interval)).isoformat()
+
+        update_data = {
+            "interval_days": new_interval,
+            "next_due": new_next_due,
+            "last_completed": now.isoformat(),
+            "completion_count": task["completion_count"] + 1,
+            "updated_at": now.isoformat(),
+        }
+
+        await db.tasks.update_one({"id": task_id}, {"$set": update_data})
+        updated = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+
+        # Log completion
+        log_doc = {
+            "id": str(uuid.uuid4()),
+            "task_id": task_id,
+            "user_id": user["id"],
+            "completed_at": now.isoformat(),
+            "feedback": data.feedback,
+            "previous_interval": current_interval,
+            "new_interval": new_interval,
+        }
+        await db.completion_logs.insert_one(log_doc)
+
     return updated
 
 # ─── Tag Routes ───
